@@ -10,6 +10,15 @@ from datetime import datetime, timedelta
 # データ読み込み
 df_pf = pd.read_csv('portfolio.csv', encoding='utf-8')
 df_pf['取得総額(円)'] = df_pf['取得単価(円)'] * df_pf['取得数']
+security_code = ['証券コード']
+
+# 企業名の取得
+def get_company_name(security_code):
+    ticker_symbol = f"{security_code}.T"
+    ticker = yf.Ticker(ticker_symbol)
+    company_name = ticker.info.get('shortName', 'Unknown')
+    sector = ticker.info.get('sector','Unknown')
+    return company_name,sector
 
 # 過去1年分のデータ取得
 def get_historical_prices(df):
@@ -18,6 +27,7 @@ def get_historical_prices(df):
         s_code = str(int(df.iloc[i]['証券コード'])) + ".T"
         ticker_info = yf.Ticker(s_code)
         history = ticker_info.history(period="1y")
+        
         history['銘柄名'] = df.iloc[i]['銘柄名']
         historical_data[df.iloc[i]['銘柄名']] = history[['Close', '銘柄名']]
     return historical_data
@@ -87,7 +97,7 @@ def render_content(tab):
         
         # 表の作成
         table_header = [
-            html.Thead(html.Tr([html.Th("項目"),html.Th("取得単価"),html.Th("取得数"),html.Th("現単価"),html.Th("現総資産"),html.Th("評価損益"),html.Th("一月後予想価格"),html.Th("年間配当金額"),html.Th("次回配当金額"),html.Th("配当利回り (%)")]))
+            html.Thead(html.Tr([html.Th("銘柄名"),html.Th("取得単価"),html.Th("取得数"),html.Th("現単価"),html.Th("現総資産"),html.Th("評価損益"),html.Th("1ヶ月後予想価格"),html.Th("年間配当金額"),html.Th("次回配当金額"),html.Th("配当利回り (%)")]))
         ]    
 
         total_current_price = int(df_pf['現総資産(円)'].sum())
@@ -114,7 +124,18 @@ def render_content(tab):
         
         rows = []
         for index, row in df_pf.iterrows():
-            rows.append(html.Tr([html.Td(row['銘柄名']),html.Td(row['取得単価(円)']),html.Td(row['取得数']), html.Td(f"{row['現単価(円)']}円"),html.Td(f"{row['現総資産(円)']}円"),html.Td(f"{row['評価損益(円)']}円"),html.Td(f"{row['1か月後の予想金額(円)']}円"),html.Td(f"{row['年間配当金(円)']}円"),html.Td(f"{row['次回配当金(円)']}円"),html.Td(f"{row['配当利回り (%)']}%")]))
+            stock_name = get_company_name(row['証券コード'])
+            #sector_name = get_sector(row['証券コード'])
+            rows.append(html.Tr([html.Td([html.Span(f"証券コード: {row['証券コード']}"), html.Br(), html.Span(stock_name)]),
+                                 html.Td(row['取得単価(円)']),
+                                 html.Td(row['取得数']), 
+                                 html.Td(f"{row['現単価(円)']}円"),
+                                 html.Td(f"{row['現総資産(円)']}円"),
+                                 html.Td(f"{row['評価損益(円)']}円"),
+                                 html.Td(f"{row['1か月後の予想金額(円)']}円"),
+                                 html.Td(f"{row['年間配当金(円)']}円"),
+                                 html.Td(f"{row['次回配当金(円)']}円"),
+                                 html.Td(f"{row['配当利回り (%)']}%")]))
         
         rows.insert(0, html.Tr([html.Td("総資産"),html.Td(""), html.Td(""), html.Td(""), html.Td(f"{total_current_price}円"), html.Td(f"{total_valuation_gain_loss}円"), html.Td(f"{total_forecast_price}円"), html.Td(f"{total_annual_dividend}円"), html.Td(f"{total_next_dividend}円"), html.Td(f"{persentage_dicidend}％")]))
         
