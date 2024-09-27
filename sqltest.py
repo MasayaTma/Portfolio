@@ -5,214 +5,374 @@ import plotly.express as px
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from sqlalchemy import create_engine, Column, Integer, String, Float, MetaData, Table
+from datetime import datetime, timedelta
+from functools import lru_cache
+import sqlite3
 
-def create_app():
-    # SQLiteデータベースの設定
-    db_file = 'portfolio.db'
-    engine = create_engine(f'sqlite:///{db_file}')
-    metadata = MetaData()
-
-    # ポートフォリオテーブルの作成
-    portfolio_table = Table(
-        'portfolio', metadata,
-        Column('id', Integer, primary_key=True),
-        Column('Stock_Code', String, nullable=False),
-        Column('Unit_Price', Float, nullable=False),
-        Column('Quantity', Integer, nullable=False)
+#データベースが無い場合は作成
+def create_table(db_file, table_name):
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute(f'''
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        id INTEGER PRIMARY KEY,
+        Security_Code TEXT,
+        Acquisition_Price REAL,
+        Quantity INTEGER
     )
-    metadata.create_all(engine)
+    ''')
+    conn.commit()
+    conn.close()
 
-    # データ取得関数
-    def get_portfolio_data():
-        df_pf = pd.read_sql_table('portfolio', engine)
-        return df_pf if not df_pf.empty else pd.DataFrame(columns=['Stock_Code', 'Unit_Price', 'Quantity'])
+# テーブルを作成
+create_table('portfolio.db', 'portfolio')
 
-    # 企業情報取得関数
-    def get_company_info(security_code):
-        ticker_symbol = f"{security_code}.T"
-        ticker = yf.Ticker(ticker_symbol)
-        company_name = ticker.info.get('shortName', 'Unknown')
-        sector = ticker.info.get('sector', 'Unknown')
-        return company_name, sector
+# SQLiteデータベースからデータを読み込む関数
+def load_data_from_sqlite(db_file, table_name):
+    conn = sqlite3.connect(db_file)
+    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    conn.close()
+    return df
 
-    # 過去1年分のデータ取得関数
-    def get_historical_prices(df):
-        historical_data = {}
-        if df.empty:
-            return historical_data
-        for i in range(len(df)):
-            try:
-                s_code = str(int(df.iloc[i]['Stock_Code'])) + ".T"
-                ticker_info = yf.Ticker(s_code)
-                history = ticker_info.history(period="1y")
-                
-                if history.empty:
-                    print(f"データが取得できませんでした: {s_code}")
-                    continue
-                
-                company_name = df.iloc[i]['Stock_Code']
-                historical_data[company_name] = history[['Close']]
-            except Exception as e:
-                print(f"エラーが発生しました: {s_code}, エラー: {e}")
-                continue
-        return historical_data
+# SQLiteデータベースからデータを読み込む
+df_pf = load_data_from_sqlite('portfolio.db', 'portfolio')
+df_pf['Acquisition_Total'] = df_pf['Acquisition_Price'] * df_pf['Quantity']
+security_code = df_pf['Security_Code'].tolist()# データベースが空の場合の処理
+try:
+    df_pf = load_data_from_sqlite('portfolio.db', 'portfolio')
+    if df_pf.empty:
+        raise ValueError("データベースが空です")
+except (pd.io.sql.DatabaseError, ValueError) as e:
+    print(e)
+    # デフォルトのデータフレームを作成
+    df_pf = pd.DataFrame(columns=['Security_Code', 'Acquisition_Price', 'Quantity'])
 
-    # Dashアプリの設定
-    app = dash.Dash(__name__, suppress_callback_exceptions=True)
+df_pf['Acquisition_Total'] = df_pf['Acquisition_Price'] * df_pf['Quantity']
+security_code = df_pf['Security_Code'].tolist()
 
-    app.layout = html.Div([
-        dcc.Tabs(id='tabs-example', value='tab-1', children=[
-            dcc.Tab(label='Total Assets', value='tab-1'),
-            dcc.Tab(label='By Security', value='tab-2'),
-            dcc.Tab(label='Register Security', value='tab-3')
-        ]),
-        html.Div(id='tabs-content-example'),
-        html.Div(id='output-state')  # output-state to display success messages
-    ])
+# 企業名の取得
+@lru_cache(maxsize=100)
+def get_company_info(security_code):
+    ticker_symbol = f"{security_code}.T"
+    ticker = yf.Ticker(ticker_symbol)
+    company_name = ticker.info.get('shortName', 'Unknown')
+    sector = ticker.info.get('sector', 'Unknown')
+    return company_name, sector
 
-    # コンテンツをレンダリングおよびデータ操作のコールバック
-    @app.callback(
-        [Output('tabs-content-example', 'children'),
-         Output('output-state', 'children')],
-        [Input('tabs-example', 'value'),
-         Input('submit-button', 'n_clicks'),
-         Input('edit-button', 'n_clicks'),
-         Input('delete-button', 'n_clicks'),
-         Input('refresh-data', 'n_clicks')],
-        [State('input-id', 'value'),
-         State('input-code', 'value'),
-         State('input-price', 'value'),
-         State('input-quantity', 'value')],
-        prevent_initial_call=True
+# データフレームに企業名の追加
+if not df_pf.empty:
+    df_pf['Company_Name'], df_pf['Sector'] = zip(*df_pf['Security_Code'].apply(get_company_info))
+else:
+    df_pf['Company_Name'] = []
+    df_pf['Sector'] = []
+    
+# 過去1年分のデータ取得
+def get_historical_prices(df):
+    historical_data = {}
+    for i in range(len(df)):
+        s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
+        ticker_info = yf.Ticker(s_code)
+        history = ticker_info.history(period="1y")
+        
+        company_name = df.iloc[i]['Company_Name']
+        history['Company_Name'] = company_name
+        historical_data[company_name] = history[['Close', 'Company_Name']]
+    return historical_data
+
+historical_prices = get_historical_prices(df_pf)
+
+df_history = pd.DataFrame()
+for name, data in historical_prices.items():
+    df_history = pd.concat([df_history, data])
+
+# 価格の予測
+def forecast_prices(df, periods=30):
+    forecast_data = {}
+    for i in range(len(df)):
+        s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
+        ticker_info = yf.Ticker(s_code)
+        history = ticker_info.history(period="1y")['Close']
+        rolling_mean = history.rolling(window=5).mean().dropna()
+        last_price = history.iloc[-1]
+        predictions = [last_price + (np.mean(rolling_mean[-5:]) - last_price) * (i/periods) for i in range(1, periods+1)]
+        future_dates = [history.index[-1] + timedelta(days=i) for i in range(1, periods+1)]
+        forecast_df = pd.DataFrame({'Date': future_dates, 'Forecast': predictions})
+        forecast_df['Company_Name'] = df_pf['Company_Name']
+        forecast_data[df.iloc[i]['Company_Name']] = forecast_df
+    return forecast_data
+
+forecast_data = forecast_prices(df_pf)
+
+# データベースの初期化
+def init_db():
+    conn = sqlite3.connect('portfolio.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS portfolio (
+        id INTEGER PRIMARY KEY,
+        Security_Code TEXT,
+        Acquisition_Price REAL,
+        Quantity INTEGER
     )
-    def render_tab_content(tab, submit_clicks, edit_clicks, delete_clicks, refresh_clicks, id, code, price, quantity):
-        ctx = dash.callback_context
-        if not ctx.triggered:
-            return html.Div(), ""
-        button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    ''')
+    conn.commit()
+    conn.close()
 
-        if button_id == 'submit-button' and submit_clicks:
-            if code and price is not None and quantity is not None:
-                with engine.connect() as conn:
-                    conn.execute(portfolio_table.insert().values(
-                        Stock_Code=code,
-                        Unit_Price=price,
-                        Quantity=quantity
-                    ))
-                return render_add_portfolio(), "データが追加されました"
-        
-        if button_id == 'edit-button' and edit_clicks:
-            if id and code and price is not None and quantity is not None:
-                with engine.connect() as conn:
-                    conn.execute(portfolio_table.update().where(portfolio_table.c.id == id).values(
-                        Stock_Code=code,
-                        Unit_Price=price,
-                        Quantity=quantity
-                    ))
-                return render_add_portfolio(), "データが更新されました"
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
 
-        if button_id == 'delete-button' and delete_clicks:
-            if id:
-                with engine.connect() as conn:
-                    conn.execute(portfolio_table.delete().where(portfolio_table.c.id == id))
-                return render_add_portfolio(), "データが削除されました"
+app.layout = html.Div([
+    dcc.Tabs(id='tabs-example', value='tab-1', children=[
+        dcc.Tab(label='データベース編集', value='tab-1',children=[html.Div(id='tab-1-content')]),
+        dcc.Tab(label='総資産推移', value='tab-2',children=[html.Div(id='tab-2-content')]),
+        dcc.Tab(label='個別銘柄推移', value='tab-3',children=[html.Div(id='tab-3-content')])
+    ]),
+    html.Div(id='tabs-content-example'),
+    html.Div(id='output-state')  # output-state to display success messages
+])
 
-        df_pf = get_portfolio_data()
-        historical_prices = get_historical_prices(df_pf)
-
-        if tab == 'tab-1':
-            if df_pf.empty:
-                return html.Div("ポートフォリオにデータがありません。銘柄を追加してください。"), ""
-
-            if historical_prices:
-                df_pf['Current_Unit_Price'] = [data['Close'].iloc[-1] for data in historical_prices.values()]
-            else:
-                df_pf['Current_Unit_Price'] = np.nan
-            
-            df_pf['Current_Total_Assets'] = df_pf['Current_Unit_Price'] * df_pf['Quantity']
-            df_pf['Valuation_gain_loss'] = (df_pf['Current_Unit_Price'] - df_pf['Unit_Price']) * df_pf['Quantity']
-            
-            # Total_Assetsグラフの作成
-            def calculate_total_asset_over_time(df, historical_data):
-                total_asset_per_day = {}
-                for i in range(len(df)):
-                    company_name = df.iloc[i]['Stock_Code']
-                    acquisition_amount = df.iloc[i]['Quantity']
-                    close_prices = historical_data[company_name]['Close']
-                    for date, price in close_prices.items():
-                        if date not in total_asset_per_day:
-                            total_asset_per_day[date] = 0
-                        total_asset_per_day[date] += price * acquisition_amount
-                total_asset_df = pd.DataFrame(list(total_asset_per_day.items()), columns=['Date', 'TotalAsset'])
-                total_asset_df = total_asset_df.sort_values('Date')
-                return total_asset_df
-            
-            total_asset_df = calculate_total_asset_over_time(df_pf, historical_prices)
-            fig_portfolio = px.line(total_asset_df, x='Date', y='TotalAsset', title='ポートフォリオの総資産推移')
-
-            # テーブル表示
-            portfolio_table = df_pf.to_dict('records')
-            table_rows = [html.Tr([html.Td(row['Stock_Code']),
-                                   html.Td(row['Unit_Price']),
-                                   html.Td(row['Quantity'])]) for row in portfolio_table]
-
-            return html.Div([
-                dcc.Graph(figure=fig_portfolio),
-                html.Hr(),
-                html.Table([
-                    html.Thead(html.Tr([html.Th("Stock_Code"), html.Th("Unit_Price"), html.Th("Quantity")])),
-                    html.Tbody(table_rows)
-                ])
-            ]), ""
-
-        elif tab == 'tab-2':
-            if df_pf.empty:
-                return html.Div("ポートフォリオにデータがありません。銘柄を追加してください。"), ""
-
-            sorted_df = df_pf.sort_values(by='Stock_Code')
-            graphs = []
-            for code in sorted_df['Stock_Code']:
-                if code in historical_prices:
-                    individual_df = historical_prices[code]
-                    fig = px.line(individual_df, x=individual_df.index, y='Close', title=f'{code}の株価推移')
-                    graphs.append(dcc.Graph(figure=fig))
-            return html.Div(graphs), ""
-
-        elif tab == 'tab-3':
-            return render_add_portfolio(), ""
-
-    # 銘柄追加フォームのレンダリング関数
-    def render_add_portfolio():
-        df_pf = get_portfolio_data()
-        
-        # 現在のポートフォリオデータを表示するためのテーブル
-        portfolio_table = df_pf.to_dict('records')
-        table_rows = [html.Tr([html.Td(row['id']),
-                               html.Td(row['Stock_Code']),
-                               html.Td(row['Unit_Price']),
-                               html.Td(row['Quantity'])]) for row in portfolio_table]
-
+@app.callback(
+    Output('tabs-content-example', 'children'),
+    Input('tabs-example', 'value')
+)
+def render_content(tab):
+    if tab == 'tab-1':
         return html.Div([
-            html.H3("銘柄追加"),
-            dcc.Input(id='input-id', type='number', placeholder='ID (編集・削除用)'),
-            dcc.Input(id='input-code', type='text', placeholder='Stock_Code'),
-            dcc.Input(id='input-price', type='number', placeholder='Unit_Price'),
-            dcc.Input(id='input-quantity', type='number', placeholder='Quantity'),
-            html.Button('確定', id='submit-button', n_clicks=0),
-            html.Button('編集', id='edit-button', n_clicks=0),
-            html.Button('削除', id='delete-button', n_clicks=0),
+            dcc.Input(id='Security_Code', type='text', placeholder='証券コード'),
+            dcc.Input(id='Acquisition_Price', type='number', placeholder='平均取得単価'),
+            dcc.Input(id='quantity', type='number', placeholder='取得数'),
+            html.Button('Submit', id='submit-val', n_clicks=0),
+            html.Button('Edit', id='edit-val', n_clicks=0),
+            html.Button('Delete', id='delete-val', n_clicks=0),
+            html.Div(id='output'),
             html.Hr(),
-            html.H4("現在のポートフォリオ"),
-            html.Table([
-                html.Thead(html.Tr([html.Th("ID"), html.Th("Stock_Code"), html.Th("Unit_Price"), html.Th("Quantity")])),
-                html.Tbody(table_rows)
-            ]),
-            html.Button('Refresh Data', id='refresh-data', n_clicks=0)
+            html.Button('Refresh Data', id='refresh-data', n_clicks=0),
+            html.Div(id='data-table')
         ])
 
-    return app
+
+    elif tab == 'tab-2':
+                # 総資産の計算
+        df_pf['Current_Price'] = [data['Close'].iloc[-1] for data in historical_prices.values()]
+        df_pf['Current_Total_Assets'] = df_pf['Current_Price'] * df_pf['Quantity']
+        df_pf['Valuation_Gain_Loss'] = (df_pf['Current_Price'] - df_pf['Acquisition_Price']) * df_pf['Quantity']
+        
+        # 年間配当データの追加
+        df_pf['Annual_Dividend_Price'] = [yf.Ticker(str(int(row['Security_Code'])) + ".T").info.get('dividendRate', 0) for index, row in df_pf.iterrows()]
+        df_pf['Annual_Dividend'] = df_pf['Annual_Dividend_Price'] * df_pf['Quantity']
+        
+        # 次回配当データの追加（仮で1/2で計算）
+        df_pf['Next_Dividend'] = df_pf['Annual_Dividend'] / 2
+        
+        # 1か月後の予想金額の取得
+        df_pf['Forecast_1_Month'] = [int(forecast_data[row['Company_Name']]['Forecast'].iloc[-1] * row['Quantity']) for index, row in df_pf.iterrows()]
+        
+        # 配当利回りの追加
+        df_pf['Dividend_Yield (%)'] = (df_pf['Annual_Dividend_Price'] / df_pf['Current_Price']) * 100
+        
+        # 金額を整数に変換
+        df_pf['Current_Price'] = df_pf['Current_Price'].apply(lambda x: int(x))
+        df_pf['Current_Total_Assets'] = df_pf['Current_Total_Assets'].apply(lambda x: int(x))
+        df_pf['Annual_Dividend'] = df_pf['Annual_Dividend'].apply(lambda x: int(x))
+        df_pf['Next_Dividend'] = df_pf['Next_Dividend'].apply(lambda x: int(x))
+        df_pf['Dividend_Yield (%)'] = df_pf['Dividend_Yield (%)'].apply(lambda x: round(x, 2))
+        
+        # 数値型に変換
+        df_pf['Annual_Dividend_Price'] = pd.to_numeric(df_pf['Annual_Dividend_Price'], errors='coerce')
+        df_pf['Current_Price'] = pd.to_numeric(df_pf['Current_Price'], errors='coerce')
+
+        # 配当利回りの再計算
+        df_pf['Dividend_Yield (%)'] = (df_pf['Annual_Dividend_Price'] / df_pf['Current_Price']) * 100
+      
+        # CSSの作成
+        cell_style = {
+            'border': '1px solid black',
+            'padding': '8px',
+            'text-align': 'center'            
+        }
+                
+        # テーブルの作成
+        table_header = [
+            html.Thead(html.Tr([html.Th("企業名", style=cell_style),
+                                html.Th("取得単価", style=cell_style),
+                                html.Th("取得数", style=cell_style),
+                                html.Th("現在単価", style=cell_style),
+                                html.Th("現在計", style=cell_style),
+                                html.Th("評価損益", style=cell_style),
+                                html.Th("1か月後予測", style=cell_style),
+                                html.Th("年間配当額", style=cell_style),
+                                html.Th("次回配当額（1/2）", style=cell_style),
+                                html.Th("配当利回り (%)", style=cell_style)]))
+        ]
+
+        # 総計データの計算
+        total_current_price = int(df_pf['Current_Total_Assets'].sum())
+        total_forecast_price = int(df_pf['Forecast_1_Month'].sum())
+        total_annual_dividend = int(df_pf['Annual_Dividend'].sum())
+        total_next_dividend = int(df_pf['Next_Dividend'].sum())
+        percentage_dividend = round(total_annual_dividend / total_current_price * 100, 2)
+        total_valuation_gain_loss = int(df_pf['Valuation_Gain_Loss'].sum())
+
+        # 整数をカンマ区切りにする
+        df_pf['Current_Price'] = df_pf['Current_Price'].apply(lambda x: "{:,}".format(int(x)))
+        df_pf['Current_Total_Assets'] = df_pf['Current_Total_Assets'].apply(lambda x: "{:,}".format(int(x)))
+        df_pf['Valuation_Gain_Loss'] = df_pf['Valuation_Gain_Loss'].apply(lambda x: "{:,}".format(int(x)))
+        df_pf['Forecast_1_Month'] = df_pf['Forecast_1_Month'].apply(lambda x: "{:,}".format(int(x)))
+        df_pf['Annual_Dividend'] = df_pf['Annual_Dividend'].apply(lambda x: "{:,}".format(int(x)))
+        df_pf['Next_Dividend'] = df_pf['Next_Dividend'].apply(lambda x: "{:,}".format(int(x)))
+        df_pf['Dividend_Yield (%)'] = df_pf['Dividend_Yield (%)'].apply(lambda x: round(x, 2))
+        
+        # 総資産行の評価損益のスタイルを設定
+        total_valuation_gain_loss_style = cell_style.copy()
+        if total_valuation_gain_loss < 0:
+            total_valuation_gain_loss_style['color'] = 'red'
+        
+        # 総資産行を1行目に追加
+        rows = []
+        rows.insert(0, html.Tr([html.Td("総資産", style=cell_style),
+                                html.Td("", style=cell_style),
+                                html.Td("", style=cell_style),
+                                html.Td("", style=cell_style),
+                                html.Td(f"{total_current_price:,} ", style=cell_style),
+                                html.Td(f"{total_valuation_gain_loss:,} ",style=total_valuation_gain_loss_style ),
+                                html.Td(f"{total_forecast_price:,} ", style=cell_style),
+                                html.Td(f"{total_annual_dividend:,} ", style=cell_style),
+                                html.Td(f"{total_next_dividend:,} ", style=cell_style),
+                                html.Td(f"{percentage_dividend}%", style=cell_style)]))
+
+        # 総資産行の下に保有証券情報を追加
+        for index, row in df_pf.iterrows():
+            stock_name, sector_name = get_company_info(row['Security_Code'])
+            valuation_gain_loss_style = cell_style.copy()
+            if int(row['Valuation_Gain_Loss'].replace(',', '')) < 0:
+                valuation_gain_loss_style['color'] = 'red'
+            rows.append(html.Tr([html.Td([html.Span(f"証券コード: {row['Security_Code']}"), html.Br(), html.Span(stock_name), html.Br(), html.Span(sector_name)], style=cell_style),
+                                 html.Td(row['Acquisition_Price'], style=cell_style),
+                                 html.Td(row['Quantity'], style=cell_style), 
+                                 html.Td(f"{row['Current_Price']} ", style=cell_style),
+                                 html.Td(f"{row['Current_Total_Assets']} ", style=cell_style),
+                                 html.Td(f"{row['Valuation_Gain_Loss']} ", style=valuation_gain_loss_style),
+                                 html.Td(f"{row['Forecast_1_Month']} ", style=cell_style),
+                                 html.Td(f"{row['Annual_Dividend']} ", style=cell_style),
+                                 html.Td(f"{row['Next_Dividend']} ", style=cell_style),
+                                 html.Td(f"{row['Dividend_Yield (%)']}%")], style=cell_style))
+
+        # テーブルの作成
+        table_body = [html.Tbody(rows)]
+        table = html.Table(table_header + table_body, style={'border': '1px solid black', 'border-collapse': 'collapse', 'width': '100%', 'text-align': 'center'})
+
+        
+        def calculate_total_asset_over_time(df, historical_data):
+            # 日ごとの総資産を追加するインデックスの作成
+            total_asset_per_day = {}
+
+            # 各企業の合計を計算
+            for i in range(len(df)):
+                company_name = df.iloc[i]['Company_Name']
+                acquisition_amount = df.iloc[i]['Quantity']
+                close_prices = historical_data[company_name]['Close']  # 過去1年分のデータから計算
+
+                # 各日付の総資産を計算
+                for date, price in close_prices.items():
+                    if date not in total_asset_per_day:
+                        total_asset_per_day[date] = 0
+                    total_asset_per_day[date] += price * acquisition_amount  # 株価*取得数でその日の資産を加算
+
+            # 日付と総資産をデータフレームに変換
+            total_asset_df = pd.DataFrame(list(total_asset_per_day.items()), columns=['Date', 'TotalAsset'])
+            total_asset_df = total_asset_df.sort_values('Date')
+            
+            return total_asset_df
+
+        # 総資産の時系列データの取得
+        total_asset_df = calculate_total_asset_over_time(df_pf, historical_prices)
+
+        # 総資産グラフの作成
+        fig_portfolio = px.line(total_asset_df, x='Date', y='TotalAsset', title='Total Asset Trend of Portfolio')
+
+        # グラフとテーブルを返す
+        return html.Div([
+            dcc.Graph(figure=fig_portfolio),
+            table
+        ])
+
+    
+    elif tab == 'tab-3':
+        sorted_df = df_pf.sort_values(by='Security_Code')
+        graphs = []
+        for name in sorted_df['Company_Name']:
+            individual_df = df_history[df_history['Company_Name'] == name]
+            forecast_df = forecast_data[name]
+            y_min = min(individual_df['Close'].min(), forecast_df['Forecast'].min()) * 0.95
+            y_max = max(individual_df['Close'].max(), forecast_df['Forecast'].max()) * 1.05
+            fig = px.line(individual_df, x=individual_df.index, y='Close', title=f'{name} Trend')
+            fig.add_scatter(x=forecast_df['Date'], y=forecast_df['Forecast'], mode='lines', name='Forecast')
+            fig.update_layout(yaxis=dict(range=[y_min, y_max]))
+            graphs.append(dcc.Graph(figure=fig))
+        return html.Div(graphs)
+
+
+@app.callback(
+    Output('output', 'children'),
+    [Input('submit-val', 'n_clicks'),
+     Input('edit-val', 'n_clicks'),
+     Input('delete-val', 'n_clicks')],
+    [State('Security_Code', 'value'),
+     State('Acquisition_Price', 'value'),
+     State('quantity', 'value')]
+)
+def update_output(submit_clicks, edit_clicks, delete_clicks, Security_Code, Acquisition_Price, quantity):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return ''
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    conn = sqlite3.connect('portfolio.db')
+    cursor = conn.cursor()
+
+    if button_id == 'submit-val' and Security_Code and Acquisition_Price is not None and quantity is not None:
+        cursor.execute('''
+        INSERT INTO portfolio (Security_Code, Acquisition_Price, Quantity) VALUES (?, ?, ?)
+        ''', (Security_Code, Acquisition_Price, quantity))
+        conn.commit()
+        conn.close()
+        return f'Data inserted: {Security_Code}, {Acquisition_Price}, {quantity}'
+
+    elif button_id == 'edit-val' and Security_Code and Acquisition_Price is not None and quantity is not None:
+        cursor.execute('''
+        UPDATE portfolio SET Acquisition_Price = ?, Quantity = ? WHERE Security_Code = ?
+        ''', (Acquisition_Price, quantity, Security_Code))
+        conn.commit()
+        conn.close()
+        return f'Data updated: {Security_Code}, {Acquisition_Price}, {quantity}'
+
+    elif button_id == 'delete-val' and Security_Code:
+        cursor.execute('''
+        DELETE FROM portfolio WHERE Security_Code = ?
+        ''', (Security_Code,))
+        conn.commit()
+        conn.close()
+        return f'Data deleted: {Security_Code}'
+
+@app.callback(
+    Output('data-table', 'children'),
+    Output('tab-2-content', 'children'),
+    Output('tab-3-content', 'children'),
+    Input('refresh-data', 'n_clicks')
+)
+def display_data(n_clicks):
+    conn = sqlite3.connect('portfolio.db')
+    df = pd.read_sql_query('SELECT * FROM portfolio', conn)
+    conn.close()
+    return html.Table([
+        html.Thead(
+            html.Tr([html.Th(col) for col in df.columns])
+        ),
+        html.Tbody([
+            html.Tr([
+                html.Td(df.iloc[i][col]) for col in df.columns
+            ]) for i in range(len(df))
+        ])
+    ])
 
 if __name__ == '__main__':
-    app = create_app()
     app.run_server(debug=True)
