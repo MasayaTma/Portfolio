@@ -34,7 +34,6 @@ def load_data_from_sqlite(db_file, table_name):
     conn.close()
     return df
 
-# SQLiteデータベースからデータを読み込む
 df_pf = load_data_from_sqlite('portfolio.db', 'portfolio')
 df_pf['Acquisition_Total'] = df_pf['Acquisition_Price'] * df_pf['Quantity']
 security_code = df_pf['Security_Code'].tolist()# データベースが空の場合の処理
@@ -121,18 +120,16 @@ def init_db():
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
 
 app.layout = html.Div([
-    dcc.Tabs(id='tabs-example', value='tab-1', children=[
-        dcc.Tab(label='データベース編集', value='tab-1',children=[html.Div(id='tab-1-content')]),
-        dcc.Tab(label='総資産推移', value='tab-2',children=[html.Div(id='tab-2-content')]),
-        dcc.Tab(label='個別銘柄推移', value='tab-3',children=[html.Div(id='tab-3-content')])
+    dcc.Tabs(id='tabs', value='tab-1', children=[
+        dcc.Tab(label='データベース編集', value='tab-1'),
+        dcc.Tab(label='総資産推移', value='tab-2'),
+        dcc.Tab(label='個別銘柄推移', value='tab-3')
     ]),
-    html.Div(id='tabs-content-example'),
-    html.Div(id='output-state')  # output-state to display success messages
-])
+    html.Div(id='tabs-content'),])
 
 @app.callback(
-    Output('tabs-content-example', 'children'),
-    Input('tabs-example', 'value')
+    Output('tabs-content', 'children'),
+    Input('tabs', 'value')
 )
 def render_content(tab):
     if tab == 'tab-1':
@@ -148,7 +145,7 @@ def render_content(tab):
             html.Button('Refresh Data', id='refresh-data', n_clicks=0),
             html.Div(id='data-table')
         ])
-
+    
 
     elif tab == 'tab-2':
                 # 総資産の計算
@@ -291,8 +288,8 @@ def render_content(tab):
 
         # グラフとテーブルを返す
         return html.Div([
-            dcc.Graph(figure=fig_portfolio),
-            table
+            dcc.Graph(figure=fig_portfolio,id='total-graph'),
+            table,
         ])
 
     
@@ -355,10 +352,9 @@ def update_output(submit_clicks, edit_clicks, delete_clicks, Security_Code, Acqu
 
 @app.callback(
     Output('data-table', 'children'),
-    Output('tab-2-content', 'children'),
-    Output('tab-3-content', 'children'),
-    Input('refresh-data', 'n_clicks')
+    Input('refresh-data', 'n_clicks'),
 )
+
 def display_data(n_clicks):
     conn = sqlite3.connect('portfolio.db')
     df = pd.read_sql_query('SELECT * FROM portfolio', conn)
