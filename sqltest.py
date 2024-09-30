@@ -284,7 +284,7 @@ def render_content(tab):
             total_asset_per_day[date] = pd.to_datetime(total_asset_df['Date'])
             
             total_asset_df['Date'] = total_asset_df['Date'].dt.tz_convert(None)
-            total_asset_df = total_asset_df.sort_values('Data')
+            total_asset_df = total_asset_df.sort_values('Date')
             
             #過去1年分のデータにフィルタリング
             today = datetime.now()
@@ -295,10 +295,30 @@ def render_content(tab):
 
         # 総資産の時系列データの取得
         total_asset_df = calculate_total_asset_over_time(df_pf, historical_prices)
+        
+        # 総資産の予測データを計算する関数
+        def calculate_total_asset_forecast(df, forecast_data):
+            # 日ごとの総資産予測を追加するインデックスの作成
+            total_forecast_per_day = {}
+
+            # 各企業の予測合計を計算
+            for company_name, forecast_df in forecast_data.items():
+                acquisition_amount = df[df['Company_Name'] == company_name]['Quantity'].values[0]
+                
+                # 各日付の総資産予測を計算
+                for date, price in zip(forecast_df['Date'], forecast_df['Forecast']):
+                    if date not in total_forecast_per_day:
+                        total_forecast_per_day[date] = 0
+                    total_forecast_per_day[date] += price * acquisition_amount  # 予測株価*取得数でその日の予測資産を加算
+                    
+        # 総資産の予測データの取得
+        total_forecast_df = calculate_total_asset_forecast(df_pf, forecast_data)
 
         # 総資産グラフの作成
         fig_portfolio = px.line(total_asset_df, x='Date', y='TotalAsset', title='Total Asset Trend of Portfolio')
-
+        fig_portfolio.add_scatter(x=total_forecast_df['Date'], y=total_forecast_df['TotalAsset'], mode='lines', name='Total Asset Forecast')
+        
+        
         # グラフとテーブルを返す
         return html.Div([
             dcc.Graph(figure=fig_portfolio,id='total-graph'),
