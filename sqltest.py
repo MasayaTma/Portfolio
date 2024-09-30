@@ -30,7 +30,7 @@ create_table('portfolio.db', 'portfolio')
 # SQLiteデータベースからデータを読み込む関数
 def load_data_from_sqlite(db_file, table_name):
     conn = sqlite3.connect(db_file)
-    df = pd.read_sql(f"SELECT * FROM {table_name}", conn)
+    df = pd.read_sql(f"SELECT * FROM {table_name} ORDER BY Security_Code", conn)
     conn.close()
     return df
 
@@ -65,13 +65,13 @@ else:
     df_pf['Company_Name'] = []
     df_pf['Sector'] = []
     
-# 過去1年分のデータ取得
+# 過去10年分のデータ取得
 def get_historical_prices(df):
     historical_data = {}
     for i in range(len(df)):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
         ticker_info = yf.Ticker(s_code)
-        history = ticker_info.history(period="1y")
+        history = ticker_info.history(period="10y")
         
         company_name = df.iloc[i]['Company_Name']
         history['Company_Name'] = company_name
@@ -90,7 +90,11 @@ def forecast_prices(df, periods=30):
     for i in range(len(df)):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
         ticker_info = yf.Ticker(s_code)
-        history = ticker_info.history(period="1y")['Close']
+        history = ticker_info.history(period="10y")['Close']
+        
+        if history.empty:
+            continue
+        
         rolling_mean = history.rolling(window=5).mean().dropna()
         last_price = history.iloc[-1]
         predictions = [last_price + (np.mean(rolling_mean[-5:]) - last_price) * (i/periods) for i in range(1, periods+1)]
@@ -149,7 +153,7 @@ def render_content(tab):
 
     elif tab == 'tab-2':
                 # 総資産の計算
-        df_pf['Current_Price'] = [data['Close'].iloc[-1] for data in historical_prices.values()]
+        df_pf['Current_Price'] = [data['Close'].iloc[-1] for data in historical_prices.values() if len (data['Close'] > 0)]
         df_pf['Current_Total_Assets'] = df_pf['Current_Price'] * df_pf['Quantity']
         df_pf['Valuation_Gain_Loss'] = (df_pf['Current_Price'] - df_pf['Acquisition_Price']) * df_pf['Quantity']
         
@@ -266,7 +270,7 @@ def render_content(tab):
             for i in range(len(df)):
                 company_name = df.iloc[i]['Company_Name']
                 acquisition_amount = df.iloc[i]['Quantity']
-                close_prices = historical_data[company_name]['Close']  # 過去1年分のデータから計算
+                close_prices = historical_data[company_name]['Close']  # 過去10年分のデータから計算
 
                 # 各日付の総資産を計算
                 for date, price in close_prices.items():
@@ -277,6 +281,15 @@ def render_content(tab):
             # 日付と総資産をデータフレームに変換
             total_asset_df = pd.DataFrame(list(total_asset_per_day.items()), columns=['Date', 'TotalAsset'])
             total_asset_df = total_asset_df.sort_values('Date')
+            total_asset_per_day[date] = pd.to_datetime(total_asset_df['Date'])
+            
+            total_asset_df['Date'] = total_asset_df['Date'].dt.tz_convert(None)
+            total_asset_df = total_asset_df.sort_values('Data')
+            
+            #過去1年分のデータにフィルタリング
+            today = datetime.now()
+            one_year_ago= today-timedelta(days=365)
+            total_asset_df = total_asset_df[total_asset_df['Date'] >one_year_ago ]
             
             return total_asset_df
 
@@ -357,7 +370,7 @@ def update_output(submit_clicks, edit_clicks, delete_clicks, Security_Code, Acqu
 
 def display_data(n_clicks):
     conn = sqlite3.connect('portfolio.db')
-    df = pd.read_sql_query('SELECT * FROM portfolio', conn)
+    df = pd.read_sql_query('SELECT * FROM portfolio ORDER BY Security_Code', conn)
     conn.close()
     return html.Table([
         html.Thead(
