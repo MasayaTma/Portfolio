@@ -85,7 +85,7 @@ for name, data in historical_prices.items():
     df_history = pd.concat([df_history, data])
 
 # 価格の予測
-def forecast_prices(df, periods=30):
+def forecast_prices(df, periods=90):
     forecast_data = {}
     for i in range(len(df)):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
@@ -152,7 +152,10 @@ def render_content(tab):
     
 
     elif tab == 'tab-2':
-                # 総資産の計算
+        # 予測データの取得
+        forecast_data = forecast_prices(df_pf)
+        
+        # 総資産の計算
         df_pf['Current_Price'] = [data['Close'].iloc[-1] for data in historical_prices.values() if len (data['Close'] > 0)]
         df_pf['Current_Total_Assets'] = df_pf['Current_Price'] * df_pf['Quantity']
         df_pf['Valuation_Gain_Loss'] = (df_pf['Current_Price'] - df_pf['Acquisition_Price']) * df_pf['Quantity']
@@ -291,12 +294,18 @@ def render_content(tab):
             total_asset_df = total_asset_df[total_asset_df['Date'] >one_year_ago ]
             
             return total_asset_df
+        
 
         # 総資産の時系列データの取得
         total_asset_df = calculate_total_asset_over_time(df_pf, historical_prices)
+        
+        # 総資産の予測データの取得
+        forecast_data = forecast_prices(df_pf, periods=90)  # 予測期間を90日に設定
+        total_forecast_df = total_asset_df(df_pf, forecast_data)
 
         # 総資産グラフの作成
         fig_portfolio = px.line(total_asset_df, x='Date', y='TotalAsset', title='Total Asset Trend of Portfolio')
+        fig_portfolio.add_scatter(x=total_forecast_df['Date'], y=total_forecast_df['TotalAsset'], mode='lines', name='Total Asset Forecast')
 
         # グラフとテーブルを返す
         return html.Div([
