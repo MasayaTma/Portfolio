@@ -8,6 +8,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from functools import lru_cache
 import sqlite3
+from statsmodels.tsa.arima.model import ARIMA
 
 #データベースが無い場合は作成
 def create_table(db_file, table_name):
@@ -85,22 +86,29 @@ for name, data in historical_prices.items():
     df_history = pd.concat([df_history, data])
 
 # 価格の予測
-def forecast_prices(df, periods=90):
+def forecast_prices_arima(df, periods=90):
     forecast_data = {}
     for i in range(len(df)):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
         ticker_info = yf.Ticker(s_code)
-        history = ticker_info.history(period="10y")['Close']       
-        rolling_mean = history.rolling(window=5).mean().dropna()
-        last_price = history.iloc[-1]
-        predictions = [last_price + (np.mean(rolling_mean[-5:]) - last_price) * (i/periods) for i in range(1, periods+1)]
-        future_dates = [history.index[-1] + timedelta(days=i) for i in range(1, periods+1)]
-        forecast_df = pd.DataFrame({'Date': future_dates, 'Forecast': predictions})
-        forecast_df['Company_Name'] = df_pf['Company_Name']
+        history = ticker_info.history(period="10y")['Close']
+        
+        # 日付インデックスに頻度情報を追加
+        history = history.asfreq('D').ffill()
+        
+        model = ARIMA(history, order=(5, 1, 0))
+        model_fit = model.fit()
+        forecast = model_fit.forecast(steps=periods)
+        
+        # 予測結果のインデックスを日付に変換
+        forecast.index = [history.index[-1] + timedelta(days=i) for i in range(1, periods+1)]
+        
+        forecast_df = pd.DataFrame({'Date': forecast.index, 'Forecast': forecast.values})
+        forecast_df['Company_Name'] = df.iloc[i]['Company_Name']
         forecast_data[df.iloc[i]['Company_Name']] = forecast_df
     return forecast_data
 
-forecast_data = forecast_prices(df_pf)
+forecast_data = forecast_prices_arima(df_pf)
 
 # データベースの初期化
 def init_db():
@@ -148,7 +156,7 @@ def render_content(tab):
     
 
     elif tab == 'tab-2':
-                # 総資産の計算
+        # 総資産の計算
         df_pf['Current_Price'] = [data['Close'].iloc[-1] for data in historical_prices.values() if len (data['Close'] > 0)]
         df_pf['Current_Total_Assets'] = df_pf['Current_Price'] * df_pf['Quantity']
         df_pf['Valuation_Gain_Loss'] = (df_pf['Current_Price'] - df_pf['Acquisition_Price']) * df_pf['Quantity']
@@ -258,7 +266,7 @@ def render_content(tab):
         table = html.Table(table_header + table_body, style={'border': '1px solid black', 'border-collapse': 'collapse', 'width': '100%', 'text-align': 'center'})
 
         
-        def calculate_total_asset_over_time(df, historical_data):
+        def calculate_total_asset_over_time(df, historical_data,forecast_data):
             # 日ごとの総資産を追加するインデックスの作成
             total_asset_per_day = {}
 
@@ -275,7 +283,7 @@ def render_content(tab):
                     total_asset_per_day[date] += price * acquisition_amount  # 株価*取得数でその日の資産を加算
                     
                 #予測データの追加
-                forecast_df = forecast_data[row['Company_Name']]
+                forecast_df = forecast_data[company_name]
                 for j in range (len(forecast_df)):
                     date = forecast_df.iloc[j]['Date']
                     forecast_price = forecast_df.iloc[j]['Forecast']
@@ -299,7 +307,7 @@ def render_content(tab):
         
 
         # 総資産の時系列データの取得
-        total_asset_df = calculate_total_asset_over_time(df_pf, historical_prices)
+        total_asset_df = calculate_total_asset_over_time(df_pf, historical_prices,forecast_data)
 
         # 総資産グラフの作成
         fig_portfolio = px.line(total_asset_df, x='Date', y='TotalAsset', title='Total Asset Trend of Portfolio')
