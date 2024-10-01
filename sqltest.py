@@ -90,11 +90,7 @@ def forecast_prices(df, periods=90):
     for i in range(len(df)):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
         ticker_info = yf.Ticker(s_code)
-        history = ticker_info.history(period="10y")['Close']
-        
-        if history.empty:
-            continue
-        
+        history = ticker_info.history(period="10y")['Close']       
         rolling_mean = history.rolling(window=5).mean().dropna()
         last_price = history.iloc[-1]
         predictions = [last_price + (np.mean(rolling_mean[-5:]) - last_price) * (i/periods) for i in range(1, periods+1)]
@@ -277,6 +273,15 @@ def render_content(tab):
                     if date not in total_asset_per_day:
                         total_asset_per_day[date] = 0
                     total_asset_per_day[date] += price * acquisition_amount  # 株価*取得数でその日の資産を加算
+                    
+                #予測データの追加
+                forecast_df = forecast_data[row['Company_Name']]
+                for j in range (len(forecast_df)):
+                    date = forecast_df.iloc[j]['Date']
+                    forecast_price = forecast_df.iloc[j]['Forecast']
+                    if date not in total_asset_per_day:
+                        total_asset_per_day[date] = 0
+                    total_asset_per_day[date] += forecast_price * acquisition_amount
 
             # 日付と総資産をデータフレームに変換
             total_asset_df = pd.DataFrame(list(total_asset_per_day.items()), columns=['Date', 'TotalAsset'])
