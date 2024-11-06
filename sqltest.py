@@ -1,16 +1,16 @@
-import dash
-from dash import dcc, html
-from dash.dependencies import Input, Output, State
-import plotly.express as px
-import pandas as pd
-import numpy as np
-import yfinance as yf
-from datetime import datetime, timedelta
-from functools import lru_cache
 import sqlite3
+import pandas as pd
+from datetime import timedelta, datetime
+import yfinance as yf
+from functools import lru_cache
+import dash
+from dash import dcc
+from dash import html
+from dash.dependencies import Input, Output, State
 from statsmodels.tsa.arima.model import ARIMA
+import plotly.express as px
 
-#データベースが無い場合は作成
+# データベースが無い場合は作成
 def create_table(db_file, table_name):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -25,38 +25,44 @@ def create_table(db_file, table_name):
     conn.commit()
     conn.close()
 
-# テーブルを作成
-create_table('portfolio.db', 'portfolio')
-
 # SQLiteデータベースからデータを読み込む関数
 def load_data_from_sqlite(db_file, table_name):
     conn = sqlite3.connect(db_file)
-    df = pd.read_sql(f"SELECT * FROM {table_name} ORDER BY Security_Code", conn)
-    conn.close()
+    try:
+        df = pd.read_sql(f"SELECT * FROM {table_name} ORDER BY Security_Code", conn)
+        if df.empty:
+            raise ValueError("データベースが空です")
+    except (pd.io.sql.DatabaseError, ValueError) as e:
+        print(e)
+        # デフォルトのデータフレームを作成
+        df = pd.DataFrame(columns=['Security_Code', 'Acquisition_Price', 'Quantity'])
+    finally:
+        conn.close()
     return df
 
+# データベースの初期化とデータ読み込み
+create_table('portfolio.db', 'portfolio')
 df_pf = load_data_from_sqlite('portfolio.db', 'portfolio')
-df_pf['Acquisition_Total'] = df_pf['Acquisition_Price'] * df_pf['Quantity']
-security_code = df_pf['Security_Code'].tolist()# データベースが空の場合の処理
-try:
-    df_pf = load_data_from_sqlite('portfolio.db', 'portfolio')
-    if df_pf.empty:
-        raise ValueError("データベースが空です")
-except (pd.io.sql.DatabaseError, ValueError) as e:
-    print(e)
-    # デフォルトのデータフレームを作成
-    df_pf = pd.DataFrame(columns=['Security_Code', 'Acquisition_Price', 'Quantity'])
 
-df_pf['Acquisition_Total'] = df_pf['Acquisition_Price'] * df_pf['Quantity']
-security_code = df_pf['Security_Code'].tolist()
+if not df_pf.empty:
+    df_pf['Acquisition_Total'] = df_pf['Acquisition_Price'] * df_pf['Quantity']
+    security_code = df_pf['Security_Code'].tolist()
+else:
+    df_pf['Acquisition_Total'] = []
+    security_code = []
 
 # 企業名の取得
 @lru_cache(maxsize=100)
 def get_company_info(security_code):
     ticker_symbol = f"{security_code}.T"
-    ticker = yf.Ticker(ticker_symbol)
-    company_name = ticker.info.get('shortName', 'Unknown')
-    sector = ticker.info.get('sector', 'Unknown')
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        company_name = ticker.info.get('shortName', 'Unknown')
+        sector = ticker.info.get('sector', 'Unknown')
+    except Exception as e:
+        company_name = 'Unknown'
+        sector = 'Unknown'
+        print(f"Error fetching company info for {security_code}: {e}")
     return company_name, sector
 
 # データフレームに企業名の追加
@@ -65,7 +71,7 @@ if not df_pf.empty:
 else:
     df_pf['Company_Name'] = []
     df_pf['Sector'] = []
-    
+
 # 過去10年分のデータ取得
 def get_historical_prices(df):
     historical_data = {}
@@ -73,7 +79,7 @@ def get_historical_prices(df):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
         ticker_info = yf.Ticker(s_code)
         history = ticker_info.history(period="10y")
-        
+
         company_name = df.iloc[i]['Company_Name']
         history['Company_Name'] = company_name
         historical_data[company_name] = history[['Close', 'Company_Name']]
@@ -92,17 +98,17 @@ def forecast_prices_arima(df, periods=90):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
         ticker_info = yf.Ticker(s_code)
         history = ticker_info.history(period="10y")['Close']
-        
+
         # 日付インデックスに頻度情報を追加
         history = history.asfreq('D').ffill()
-        
+
         model = ARIMA(history, order=(5, 1, 0))
         model_fit = model.fit()
         forecast = model_fit.forecast(steps=periods)
-        
+
         # 予測結果のインデックスを日付に変換
         forecast.index = [history.index[-1] + timedelta(days=i) for i in range(1, periods+1)]
-        
+
         forecast_df = pd.DataFrame({'Date': forecast.index, 'Forecast': forecast.values})
         forecast_df['Company_Name'] = df.iloc[i]['Company_Name']
         forecast_data[df.iloc[i]['Company_Name']] = forecast_df
@@ -133,7 +139,9 @@ app.layout = html.Div([
         dcc.Tab(label='総資産推移', value='tab-2'),
         dcc.Tab(label='個別銘柄推移', value='tab-3')
     ]),
-    html.Div(id='tabs-content'),])
+    html.Div(id='tabs-content'),
+    html.Div(id='output'),
+])
 
 @app.callback(
     Output('tabs-content', 'children'),
