@@ -45,7 +45,7 @@ for name, data in historical_prices.items():
     df_history = pd.concat([df_history, data])
 
 # 価格の予測
-def forecast_prices(df, periods=30):
+def forecast_prices(df, periods=90):
     forecast_data = {}
     for i in range(len(df)):
         s_code = str(int(df.iloc[i]['Security_Code'])) + ".T"
